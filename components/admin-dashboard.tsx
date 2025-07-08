@@ -1,6 +1,7 @@
 "use client"
 
-import { useState, useEffect, useCallback, useMemo, ReactNode } from "react"
+import React, { useState, useEffect, useCallback, useMemo, ReactNode } from "react"
+import { id, vi } from "date-fns/locale";
 import {
   Home,
   Users,
@@ -14,7 +15,7 @@ import {
   Plus,
   Search,
   Filter,
-  Edit,
+  Edit as EditIcon,
   Trash2,
   ArrowUpDown,
   ChevronLeft,
@@ -34,7 +35,9 @@ import {
   XCircle,
   Upload,
   Bell,
-  HelpCircle
+  HelpCircle,
+  Save,
+  MoreHorizontal
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from "@/components/ui/card"
@@ -43,8 +46,26 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { format, addMinutes, differenceInSeconds, isAfter, isBefore } from "date-fns"
+import { format, addMinutes, differenceInSeconds, isAfter, isBefore, parseISO } from "date-fns"
 import { Progress } from "@/components/ui/progress"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { cn } from "@/lib/utils"
 import { Label } from "@/components/ui/label"
 import {
@@ -59,10 +80,13 @@ import {
   SidebarTrigger,
 } from "@/components/ui/sidebar"
 import { UserMenu } from "@/components/user-menu"
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Switch } from "@/components/ui/switch"
 import { Separator } from "@/components/ui/separator"
 import { toast } from "@/hooks/use-toast"
+import { generateSessions as generateSessionsUtil } from "@/lib/sessionUtils";
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@radix-ui/react-dropdown-menu";
+
+// Use the imported generateSessions function directly
 
 type Order = {
   id: string
@@ -90,6 +114,56 @@ interface TradingSession {
   session: string;
   progress: number;
 }
+
+type RequestStatus = 'pending' | 'approved' | 'rejected' | 'cancelled';
+
+// Add useToast hook import
+const useToast = () => ({
+  toast: (options: { title: string; description: string; variant?: string }) => {
+    console.log('Toast:', options);
+  }
+});
+
+type BankAccount = {
+  bankName: string;
+  accountNumber: string;
+  accountHolder: string;
+  branch?: string;
+};
+
+type DepositRequest = {
+  _id: string;
+  userId: string;
+  username: string;
+  amount: number;
+  status: RequestStatus;
+  createdAt: Date;
+  updatedAt: Date;
+  transactionCode?: string;
+  note?: string;
+  processedBy?: string;
+  processedAt?: Date;
+};
+
+type WithdrawalRequest = {
+  time: ReactNode;
+  customer: ReactNode;
+  bank: ReactNode;
+  accountNumber: ReactNode;
+  accountHolder: ReactNode;
+  _id: string;
+  userId: string;
+  username: string;
+  amount: number;
+  receivedAmount: number;
+  status: RequestStatus;
+  bankAccount: BankAccount;
+  createdAt: Date;
+  updatedAt: Date;
+  note?: string;
+  processedBy?: string;
+  processedAt?: Date;
+};
 
 type PageType =
   | "dashboard"
@@ -120,6 +194,34 @@ type Customer = {
   lastLogin?: Date;
 };
 
+// Add these interfaces at the top with other interfaces
+interface RecentUser {
+  _id: string;
+  username: string;
+  fullName?: string;
+  email?: string;
+  phone?: string;
+  balance?: {
+    available: number;
+    frozen: number;
+  };
+  status: {
+    active: boolean;
+    betLocked: boolean;
+    withdrawLocked: boolean;
+  };
+  createdAt: string;
+  lastLogin?: string;
+}
+
+interface RecentSession {
+  _id: string;
+  sessionId: string;
+  startTime: string;
+  endTime: string;
+  status: 'upcoming' | 'active' | 'completed';
+  result?: string;
+}
 
 
 // Page Components
@@ -130,6 +232,17 @@ const CustomersPage = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
   const customersPerPage = 10;
+  const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deletingCustomer, setDeletingCustomer] = useState<Customer | null>(null);
+  const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
+  const [formData, setFormData] = useState({
+    fullName: '',
+    email: '',
+    phone: '',
+    status: 'active'
+  });
+  const [isSaving, setIsSaving] = useState(false);
 
   // Helper function to safely parse dates from API response
   const parseCustomerDates = (customerData: any): Customer => {
@@ -198,31 +311,67 @@ const CustomersPage = () => {
     fetchCustomers();
   }, []);
 
-  // Filter customers based on search term
-  const filteredCustomers = customers.filter(customer => 
-    customer.username.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    customer.fullName?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    customer.email?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    customer.phone?.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  // Debounce search term to avoid too many re-renders
+  const debouncedSearchTerm = useMemo(() => {
+    return searchTerm;
+  }, [searchTerm]);
+
+  // Filter customers based on search term with debounce
+  const filteredCustomers = useMemo(() => {
+    if (!debouncedSearchTerm) return customers;
+    
+    const term = debouncedSearchTerm.toLowerCase();
+    return customers.filter(customer => 
+      customer.username.toLowerCase().includes(term) ||
+      (customer.fullName?.toLowerCase() || '').includes(term) ||
+      (customer.email?.toLowerCase() || '').includes(term) ||
+      (customer.phone?.toLowerCase() || '').includes(term)
+    );
+  }, [customers, debouncedSearchTerm]);
 
   // Get current customers for pagination
   const indexOfLastCustomer = currentPage * customersPerPage;
   const indexOfFirstCustomer = indexOfLastCustomer - customersPerPage;
-  const currentCustomers = filteredCustomers.slice(indexOfFirstCustomer, indexOfLastCustomer);
-  const totalPages = Math.ceil(filteredCustomers.length / customersPerPage);
+  const currentCustomers = useMemo(() => {
+    return filteredCustomers.slice(indexOfFirstCustomer, indexOfLastCustomer);
+  }, [filteredCustomers, indexOfFirstCustomer, indexOfLastCustomer]);
+  
+  const totalPages = Math.max(1, Math.ceil(filteredCustomers.length / customersPerPage));
+  
+  // Reset to first page if current page is out of bounds after filtering
+  useEffect(() => {
+    if (currentPage > totalPages && totalPages > 0) {
+      setCurrentPage(1);
+    }
+  }, [currentPage, totalPages]);
 
   const handleStatusToggle = async (userId: string, field: 'active' | 'betLocked' | 'withdrawLocked') => {
     try {
-      const response = await fetch('/api/admin/users', {
+      // Create optimistic update
+      setCustomers(prevCustomers => 
+        prevCustomers.map(customer => 
+          customer._id === userId
+            ? {
+                ...customer,
+                status: {
+                  ...customer.status,
+                  [field]: !customer.status?.[field]
+                }
+              }
+            : customer
+        )
+      );
+      
+      const response = await fetch(`/api/admin/users/${userId}`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          userId,
-          field,
-          value: !customers.find(c => c._id === userId)?.status[field]
+          status: {
+            ...customers.find(c => c._id === userId)?.status,
+            [field]: !customers.find(c => c._id === userId)?.status[field]
+          }
         })
       });
 
@@ -230,25 +379,175 @@ const CustomersPage = () => {
         throw new Error('Cập nhật trạng thái thất bại');
       }
 
-      // Update local state with proper date handling
-      setCustomers(customers.map(customer => 
-        customer._id === userId 
-          ? parseCustomerDates({
-              ...customer, 
-              status: { 
-                ...customer.status, 
-                [field]: !customer.status[field] 
-              } 
-            })
-          : customer
-      ));
+      // The optimistic update already handled the UI update
+      // Just verify the server response was successful
+
+      const currentValue = !customers.find(c => c._id === userId)?.status[field];
+      toast({
+        title: 'Thành công',
+        description: `Đã ${currentValue ? 'bật' : 'tắt'} ${getStatusFieldName(field)}`,
+        variant: 'default',
+      });
     } catch (err) {
       console.error('Lỗi khi cập nhật trạng thái:', err);
       toast({
         title: 'Lỗi',
-        description: 'Không thể cập nhật trạng thái người dùng',
+        description: err instanceof Error ? err.message : 'Không thể cập nhật trạng thái người dùng',
         variant: 'destructive',
       });
+    }
+  };
+
+  const getStatusFieldName = (field: string) => {
+    switch (field) {
+      case 'active':
+        return 'trạng thái hoạt động';
+      case 'betLocked':
+        return 'khóa đặt cược';
+      case 'withdrawLocked':
+        return 'khóa rút tiền';
+      default:
+        return 'trạng thái';
+    }
+  };
+
+  const handleEditClick = (customer: Customer) => {
+    setEditingCustomer(customer);
+    setFormData({
+      fullName: customer.fullName || '',
+      email: customer.email || '',
+      phone: customer.phone || '',
+      status: customer.status?.active ? 'active' : 'inactive'
+    });
+    setIsEditModalOpen(true);
+  };
+
+  const handleDeleteClick = (customer: Customer) => {
+    setDeletingCustomer(customer);
+    setDeleteDialogOpen(true);
+  };
+
+  const handleDeleteConfirm = async () => {
+    if (!deletingCustomer) return;
+    
+    try {
+      const response = await fetch(`/api/admin/users/${deletingCustomer._id}`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error('Không thể xóa người dùng');
+      }
+
+      // Update the customers list by removing the deleted customer
+      setCustomers(customers.filter(customer => customer._id !== deletingCustomer._id));
+      
+      toast({
+        title: 'Thành công',
+        description: 'Đã xóa người dùng thành công',
+        variant: 'default',
+      });
+    } catch (err) {
+      console.error('Lỗi khi xóa người dùng:', err);
+      toast({
+        title: 'Lỗi',
+        description: 'Không thể xóa người dùng. Vui lòng thử lại.',
+        variant: 'destructive',
+      });
+    } finally {
+      setDeleteDialogOpen(false);
+      setDeletingCustomer(null);
+    }
+  };
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const { name, value } = e.target;
+    setFormData(prev => ({
+      ...prev,
+      [name]: value
+    }));
+  };
+
+  const handleSelectChange = (value: string) => {
+    setFormData(prev => ({
+      ...prev,
+      status: value
+    }));
+  };
+
+  const handleSaveChanges = async () => {
+    if (!editingCustomer) return;
+    
+    try {
+      setIsSaving(true);
+      
+      // Validate form data
+      if (!formData.fullName.trim()) {
+        throw new Error('Vui lòng nhập họ tên');
+      }
+      
+      if (formData.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email)) {
+        throw new Error('Email không hợp lệ');
+      }
+      
+      const response = await fetch(`/api/admin/users/${editingCustomer._id}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          fullName: formData.fullName.trim(),
+          email: formData.email.trim() || undefined,
+          phone: formData.phone.trim() || undefined,
+          status: {
+            active: formData.status === 'active',
+            betLocked: editingCustomer.status?.betLocked || false,
+            withdrawLocked: editingCustomer.status?.withdrawLocked || false
+          }
+        })
+      });
+
+      const responseData = await response.json();
+      
+      if (!response.ok) {
+        throw new Error(responseData.message || 'Cập nhật thông tin thất bại');
+      }
+
+      // Update local state
+      setCustomers(customers.map(customer => 
+        customer._id === editingCustomer._id
+          ? {
+              ...customer,
+              fullName: formData.fullName.trim(),
+              email: formData.email.trim() || undefined,
+              phone: formData.phone.trim() || undefined,
+              status: {
+                ...customer.status,
+                active: formData.status === 'active'
+              }
+            }
+          : customer
+      ));
+
+      toast({
+        title: 'Thành công',
+        description: 'Đã cập nhật thông tin khách hàng thành công',
+        variant: 'default',
+      });
+
+      setIsEditModalOpen(false);
+    } catch (err) {
+      console.error('Lỗi khi cập nhật thông tin:', err);
+      toast({
+        title: 'Lỗi',
+        description: err instanceof Error ? err.message : 'Không thể cập nhật thông tin khách hàng',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -324,9 +623,10 @@ const CustomersPage = () => {
                           <div className="flex items-center">
                             <div className="flex items-center space-x-2">
                               <Switch
-                                id={`active-${customer._id}`}
+                                key={`active-${customer._id}`}
                                 checked={customer.status?.active ?? false}
                                 onCheckedChange={() => handleStatusToggle(customer._id, 'active')}
+                                className="ml-2"
                               />
                               <Label htmlFor={`active-${customer._id}`} className="cursor-pointer">
                                 {customer.status?.active ? 'Đang hoạt động' : 'Đã khóa'}
@@ -336,9 +636,10 @@ const CustomersPage = () => {
                           <div className="flex items-center">
                             <div className="flex items-center space-x-2">
                               <Switch
-                                id={`bet-lock-${customer._id}`}
+                                key={`bet-lock-${customer._id}`}
                                 checked={customer.status?.betLocked ?? false}
                                 onCheckedChange={() => handleStatusToggle(customer._id, 'betLocked')}
+                                className="ml-2"
                               />
                               <Label htmlFor={`bet-lock-${customer._id}`} className="cursor-pointer">
                                 {customer.status?.betLocked ? 'Khóa cược' : 'Mở cược'}
@@ -348,9 +649,10 @@ const CustomersPage = () => {
                           <div className="flex items-center">
                             <div className="flex items-center space-x-2">
                               <Switch
-                                id={`withdraw-lock-${customer._id}`}
+                                key={`withdraw-lock-${customer._id}`}
                                 checked={customer.status?.withdrawLocked ?? false}
                                 onCheckedChange={() => handleStatusToggle(customer._id, 'withdrawLocked')}
+                                className="ml-2"
                               />
                               <Label htmlFor={`withdraw-lock-${customer._id}`} className="cursor-pointer">
                                 {customer.status?.withdrawLocked ? 'Khóa rút tiền' : 'Mở rút tiền'}
@@ -365,9 +667,24 @@ const CustomersPage = () => {
                           : '-'}
                       </TableCell>
                       <TableCell>
-                        <Button variant="ghost" size="sm" className="h-8 w-8 p-0">
-                          <Edit className="h-4 w-4" />
-                        </Button>
+                        <div className="flex space-x-1">
+                          <Button 
+                            variant="ghost" 
+                            size="sm" 
+                            className="h-8 w-8 p-0 hover:bg-blue-100"
+                            onClick={() => handleEditClick(customer)}
+                          >
+                            <EditIcon className="h-4 w-4 text-blue-600" />
+                          </Button>
+                          <Button 
+                            variant="ghost" 
+                            size="sm" 
+                            className="h-8 w-8 p-0 hover:bg-red-100"
+                            onClick={() => handleDeleteClick(customer)}
+                          >
+                            <Trash2 className="h-4 w-4 text-red-600" />
+                          </Button>
+                        </div>
                       </TableCell>
                     </TableRow>
                   ))
@@ -435,167 +752,784 @@ const CustomersPage = () => {
           )}
         </CardContent>
       </Card>
+
+      {/* Edit Customer Modal */}
+      <Dialog open={isEditModalOpen} onOpenChange={setIsEditModalOpen}>
+        <DialogContent className="sm:max-w-[425px]">
+          <DialogHeader>
+            <DialogTitle>Chỉnh sửa thông tin khách hàng</DialogTitle>
+            <DialogDescription>
+              Cập nhật thông tin khách hàng. Nhấn Lưu khi hoàn tất.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="fullName">Họ tên</Label>
+              <Input
+                id="fullName"
+                name="fullName"
+                value={formData.fullName}
+                onChange={handleInputChange}
+                placeholder="Nhập họ tên"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="email">Email</Label>
+              <Input
+                id="email"
+                name="email"
+                type="email"
+                value={formData.email}
+                onChange={handleInputChange}
+                placeholder="Nhập email"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="phone">Số điện thoại</Label>
+              <Input
+                id="phone"
+                name="phone"
+                value={formData.phone}
+                onChange={handleInputChange}
+                placeholder="Nhập số điện thoại"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Trạng thái</Label>
+              <Select
+                value={formData.status}
+                onValueChange={handleSelectChange}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Chọn trạng thái" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="active">Đang hoạt động</SelectItem>
+                  <SelectItem value="inactive">Đã khóa</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setIsEditModalOpen(false)}
+              disabled={isSaving}
+            >
+              Hủy
+            </Button>
+            <Button
+              type="submit"
+              onClick={handleSaveChanges}
+              disabled={isSaving}
+            >
+              {isSaving ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Đang lưu...
+                </>
+              ) : (
+                'Lưu thay đổi'
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete Confirmation Dialog */}
+      <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Xác nhận xóa</AlertDialogTitle>
+            <AlertDialogDescription>
+              Bạn có chắc chắn muốn xóa người dùng {deletingCustomer?.username}? Hành động này không thể hoàn tác.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Hủy</AlertDialogCancel>
+            <AlertDialogAction 
+              onClick={handleDeleteConfirm}
+              className="bg-red-600 hover:bg-red-700"
+            >
+              Xác nhận xóa
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
 
+interface OrderHistoryFilter {
+  username: string;
+  startDate: string;
+  endDate: string;
+  status: string;
+}
+
 const OrderHistoryPage = () => {
-  const [orders, setOrders] = useState<Order[]>([])
-  
+  const [orders, setOrders] = useState<Order[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [filters, setFilters] = useState<OrderHistoryFilter>({
+    username: '',
+    startDate: '',
+    endDate: '',
+    status: 'all'
+  });
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [totalItems, setTotalItems] = useState(0);
+  const itemsPerPage = 10;
+
+  const fetchOrders = useCallback(async (page: number = 1) => {
+    try {
+      setIsLoading(true);
+      const { username, startDate, endDate, status } = filters;
+      
+      let url = `/api/admin/orders?page=${page}&limit=${itemsPerPage}`;
+      if (username) url += `&username=${encodeURIComponent(username)}`;
+      if (startDate) url += `&startDate=${startDate}`;
+      if (endDate) url += `&endDate=${endDate}`;
+      if (status !== 'all') url += `&status=${status}`;
+      
+      const response = await fetch(url);
+      const data = await response.json();
+      
+      if (response.ok) {
+        setOrders(data.orders || []);
+        setTotalItems(data.total || 0);
+        setTotalPages(data.totalPages || 1);
+        setCurrentPage(page);
+      } else {
+        throw new Error(data.error || 'Failed to fetch orders');
+      }
+    } catch (error) {
+      console.error('Error fetching orders:', error);
+      toast({
+        variant: "destructive",
+        title: "Lỗi",
+        description: "Không thể tải lịch sử đơn hàng. Vui lòng thử lại.",
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  }, [filters]);
+
+  useEffect(() => {
+    fetchOrders(1);
+  }, [filters, fetchOrders]);
+
+  const handleFilterChange = (field: keyof OrderHistoryFilter, value: string) => {
+    setFilters(prev => ({
+      ...prev,
+      [field]: value
+    }));
+  };
+
+  const handleResetFilters = () => {
+    setFilters({
+      username: '',
+      startDate: '',
+      endDate: '',
+      status: 'all'
+    });
+  };
+
+  const formatCurrency = (amount: number) => {
+    return new Intl.NumberFormat('vi-VN').format(amount) + 'đ';
+  };
+
+  const formatDate = (dateString: string) => {
+    return new Date(dateString).toLocaleString('vi-VN');
+  };
+
+  const renderStatusBadge = (status: string) => {
+    const statusMap: Record<string, { label: string; variant: string }> = {
+      pending: { label: 'Đang chờ', variant: 'bg-yellow-100 text-yellow-800' },
+      active: { label: 'Đang diễn ra', variant: 'bg-blue-100 text-blue-800' },
+      win: { label: 'Thắng', variant: 'bg-green-100 text-green-800' },
+      lose: { label: 'Thua', variant: 'bg-red-100 text-red-800' },
+      completed: { label: 'Hoàn thành', variant: 'bg-gray-100 text-gray-800' },
+    };
+
+    const statusInfo = statusMap[status] || { label: status, variant: 'bg-gray-100 text-gray-800' };
+    
+    return (
+      <span className={`px-2 py-1 text-xs font-medium rounded-full ${statusInfo.variant}`}>
+        {statusInfo.label}
+      </span>
+    );
+  };
+
   return (
-    <div className="p-6">
-      <h2 className="text-2xl font-bold mb-6">Lịch sử đơn hàng</h2>
-      <div className="space-y-4">
-        {orders.length === 0 ? (
-          <p className="text-gray-500">Không có dữ liệu đơn hàng</p>
-        ) : (
-          <div className="space-y-2">
-            {orders.map(order => (
-              <div key={order.id} className="border rounded p-4">
-                <div className="flex justify-between items-center">
-                  <span className="font-medium">{order.customer}</span>
-                  <span className="text-sm text-gray-500">
-                    {new Date(order.date).toLocaleDateString('vi-VN')}
-                  </span>
-                </div>
-                <div className="mt-2">
-                  <Badge variant="outline" className="mr-2">
-                    {order.status}
-                  </Badge>
-                  <span>{order.amount.toLocaleString('vi-VN')} VNĐ</span>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
+    <div className="space-y-6">
+      {/* Breadcrumb */}
+      <div className="flex items-center gap-2 text-sm text-gray-600">
+        <Home className="h-4 w-4" />
+        <span>/</span>
+        <span>Lịch sử đơn hàng</span>
       </div>
+
+      {/* Filters */}
+      <Card>
+        <CardContent className="p-6">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div className="space-y-2">
+              <Label htmlFor="username">Tên đăng nhập</Label>
+              <Input
+                id="username"
+                placeholder="Nhập tên đăng nhập"
+                value={filters.username}
+                onChange={(e) => handleFilterChange('username', e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="startDate">Từ ngày</Label>
+              <Input
+                id="startDate"
+                type="date"
+                value={filters.startDate}
+                onChange={(e) => handleFilterChange('startDate', e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="endDate">Đến ngày</Label>
+              <Input
+                id="endDate"
+                type="date"
+                value={filters.endDate}
+                onChange={(e) => handleFilterChange('endDate', e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="status">Trạng thái</Label>
+              <Select
+                value={filters.status}
+                onValueChange={(value) => handleFilterChange('status', value)}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Chọn trạng thái" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">Tất cả</SelectItem>
+                  <SelectItem value="pending">Đang chờ</SelectItem>
+                  <SelectItem value="active">Đang diễn ra</SelectItem>
+                  <SelectItem value="win">Thắng</SelectItem>
+                  <SelectItem value="lose">Thua</SelectItem>
+                  <SelectItem value="completed">Hoàn thành</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <div className="flex justify-end mt-4 space-x-2">
+            <Button
+              variant="outline"
+              onClick={handleResetFilters}
+              disabled={isLoading}
+            >
+              Đặt lại
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Orders Table */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Lịch sử đơn hàng</CardTitle>
+          <CardDescription>
+            Tổng cộng: {totalItems} đơn hàng
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {isLoading ? (
+            <div className="flex justify-center items-center h-40">
+              <Loader2 className="h-8 w-8 animate-spin" />
+            </div>
+          ) : orders.length === 0 ? (
+            <div className="text-center py-12 text-gray-500">
+              Không tìm thấy đơn hàng nào phù hợp
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Phiên</TableHead>
+                    <TableHead>Người dùng</TableHead>
+                    <TableHead>Loại cược</TableHead>
+                    <TableHead>Số tiền</TableHead>
+                    <TableHead>Kết quả</TableHead>
+                    <TableHead>Thời gian</TableHead>
+                    <TableHead>Trạng thái</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {orders.map((order) => (
+                    <TableRow key={order.id} className="hover:bg-gray-50">
+                      <TableCell className="font-medium">{order.session}</TableCell>
+                      <TableCell>{order.user}</TableCell>
+                      <TableCell>
+                        <Badge
+                          variant={order.type === 'Lên' ? 'default' : 'destructive'}
+                          className={cn(
+                            order.type === 'Lên' 
+                              ? 'bg-green-500 hover:bg-green-600' 
+                              : 'bg-red-500 hover:bg-red-600',
+                            'text-white'
+                          )}
+                        >
+                          {order.type}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="font-medium">
+                        {formatCurrency(order.amount)}
+                      </TableCell>
+                      <TableCell className={cn("font-semibold", {
+                        'text-green-600': order.status === 'win',
+                        'text-red-600': order.status === 'lose',
+                        'text-gray-600': !['win', 'lose'].includes(order.status)
+                      })}>
+                        {order.status === 'win' 
+                          ? `+${formatCurrency(order.result || 0)}` 
+                          : order.status === 'lose' 
+                            ? `-${formatCurrency(order.amount)}` 
+                            : '-'}
+                      </TableCell>
+                      <TableCell className="text-gray-600">
+                        {formatDate(order.time as string)}
+                      </TableCell>
+                      <TableCell>
+                        {renderStatusBadge(order.status)}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+              
+              {/* Pagination */}
+              {totalPages > 1 && (
+                <div className="flex items-center justify-between mt-4">
+                  <div className="text-sm text-gray-600">
+                    Hiển thị {(currentPage - 1) * itemsPerPage + 1} - {Math.min(currentPage * itemsPerPage, totalItems)} của {totalItems} kết quả
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => fetchOrders(currentPage - 1)}
+                      disabled={currentPage === 1 || isLoading}
+                    >
+                      Trước
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => fetchOrders(currentPage + 1)}
+                      disabled={currentPage >= totalPages || isLoading}
+                    >
+                      Tiếp
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
     </div>
   )
 }
 
 const DepositRequestsPage = () => {
-  const [deposits, setDeposits] = useState<Array<{
-    id: string
-    customer: string
-    amount: number
-    status: 'pending' | 'approved' | 'rejected'
-    date: Date
-  }>>([])
-  
+  const [deposits, setDeposits] = useState<DepositRequest[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [statusFilter, setStatusFilter] = useState<RequestStatus | 'all'>('pending');
+  const [searchTerm, setSearchTerm] = useState('');
+  const itemsPerPage = 10;
+  const { toast } = useToast();
+
+  const fetchDeposits = useCallback(async (page: number = 1) => {
+    try {
+      setLoading(true);
+      const queryParams = new URLSearchParams({
+        page: page.toString(),
+        limit: itemsPerPage.toString(),
+        ...(statusFilter !== 'all' && { status: statusFilter }),
+        ...(searchTerm && { search: searchTerm })
+      });
+
+      const response = await fetch(`/api/admin/deposits?${queryParams}`);
+      if (!response.ok) {
+        throw new Error('Không thể tải danh sách yêu cầu nạp tiền');
+      }
+      
+      const data = await response.json();
+      setDeposits(data.deposits.map((d: any) => ({
+        ...d,
+        createdAt: new Date(d.createdAt),
+        updatedAt: new Date(d.updatedAt),
+        ...(d.processedAt && { processedAt: new Date(d.processedAt) })
+      })));
+      setTotalPages(data.totalPages);
+      setCurrentPage(data.currentPage);
+    } catch (err) {
+      console.error('Lỗi khi tải yêu cầu nạp tiền:', err);
+      setError(err instanceof Error ? err.message : 'Đã xảy ra lỗi');
+      toast({
+        title: 'Lỗi',
+        description: 'Không thể tải danh sách yêu cầu nạp tiền',
+        variant: 'destructive',
+      });
+    } finally {
+      setLoading(false);
+    }
+  }, [statusFilter, searchTerm]);
+
+  useEffect(() => {
+    fetchDeposits();
+  }, [fetchDeposits]);
+
+  const handleStatusUpdate = async (id: string, status: 'approved' | 'rejected', note?: string) => {
+    try {
+      setLoading(true);
+      const response = await fetch(`/api/admin/deposits/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status, note })
+      });
+
+      if (!response.ok) {
+        throw new Error('Cập nhật trạng thái thất bại');
+      }
+
+      await fetchDeposits(currentPage);
+      
+      toast({
+        title: 'Thành công',
+        description: `Đã ${status === 'approved' ? 'duyệt' : 'từ chối'} yêu cầu nạp tiền`,
+        variant: 'default',
+      });
+    } catch (err) {
+      console.error('Lỗi khi cập nhật trạng thái:', err);
+      toast({
+        title: 'Lỗi',
+        description: 'Không thể cập nhật trạng thái yêu cầu',
+        variant: 'destructive',
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const renderStatusBadge = (status: RequestStatus) => {
+    const statusMap = {
+      pending: { label: 'Chờ xử lý', color: 'bg-yellow-100 text-yellow-800' },
+      approved: { label: 'Đã duyệt', color: 'bg-green-100 text-green-800' },
+      rejected: { label: 'Từ chối', color: 'bg-red-100 text-red-800' },
+      cancelled: { label: 'Đã hủy', color: 'bg-gray-100 text-gray-800' }
+    };
+    
+    const statusInfo = statusMap[status] || { label: status, color: 'bg-gray-100 text-gray-800' };
+    
+    return (
+      <span className={`px-2 py-1 rounded-full text-xs font-medium ${statusInfo.color}`}>
+        {statusInfo.label}
+      </span>
+    );
+  };
+
   return (
-    <div className="p-6">
-      <h2 className="text-2xl font-bold mb-6">Yêu cầu nạp tiền</h2>
-      <div className="space-y-4">
-        {deposits.length === 0 ? (
-          <p className="text-gray-500">Không có yêu cầu nạp tiền nào đang chờ xử lý</p>
-        ) : (
-          <div className="space-y-2">
-            {deposits.map(deposit => (
-              <div key={deposit.id} className="border rounded p-4 flex justify-between items-center">
-                <div>
-                  <div className="font-medium">{deposit.customer}</div>
-                  <div className="text-sm text-gray-500">
-                    {deposit.amount.toLocaleString('vi-VN')} VNĐ • {deposit.date.toLocaleDateString('vi-VN')}
-                  </div>
-                </div>
-                <div className="space-x-2">
-                  <Button variant="outline" size="sm">Xem chi tiết</Button>
-                  <Button size="sm">Duyệt</Button>
-                </div>
-              </div>
-            ))}
+    <div className="p-6 space-y-6">
+      <div className="flex justify-between items-center">
+        <h2 className="text-2xl font-bold">Yêu cầu nạp tiền</h2>
+        <div className="flex items-center space-x-4">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-gray-400" />
+            <Input
+              type="text"
+              placeholder="Tìm kiếm theo tên hoặc mã giao dịch..."
+              className="pl-10 w-64"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+            />
           </div>
-        )}
+          <Select 
+            value={statusFilter} 
+            onValueChange={(value) => setStatusFilter(value as RequestStatus | 'all')}
+          >
+            <SelectTrigger className="w-40">
+              <SelectValue placeholder="Lọc theo trạng thái" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">Tất cả</SelectItem>
+              <SelectItem value="pending">Chờ xử lý</SelectItem>
+              <SelectItem value="approved">Đã duyệt</SelectItem>
+              <SelectItem value="rejected">Từ chối</SelectItem>
+              <SelectItem value="cancelled">Đã hủy</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
       </div>
+
+      <Card>
+        <CardContent className="p-0">
+          {loading ? (
+            <div className="flex justify-center items-center p-8">
+              <Loader2 className="h-6 w-6 animate-spin text-gray-500" />
+              <span className="ml-2">Đang tải...</span>
+            </div>
+          ) : error ? (
+            <div className="p-6 text-center text-red-500">{error}</div>
+          ) : deposits.length === 0 ? (
+            <div className="p-6 text-center text-gray-500">
+              Không tìm thấy yêu cầu nạp tiền nào
+            </div>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Thời gian</TableHead>
+                  <TableHead>Khách hàng</TableHead>
+                  <TableHead>Số tiền</TableHead>
+                  <TableHead>Mã giao dịch</TableHead>
+                  <TableHead>Trạng thái</TableHead>
+                  <TableHead>Ghi chú</TableHead>
+                  <TableHead className="text-right">Thao tác</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {deposits.map((deposit) => (
+                  <TableRow key={deposit._id}>
+                    <TableCell className="whitespace-nowrap">
+                      {format(deposit.createdAt, 'dd/MM/yyyy HH:mm')}
+                    </TableCell>
+                    <TableCell className="font-medium">
+                      <div>{deposit.username}</div>
+                      <div className="text-xs text-gray-500">ID: {deposit.userId}</div>
+                    </TableCell>
+                    <TableCell className="font-medium">
+                      {new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(deposit.amount)}
+                    </TableCell>
+                    <TableCell className="font-mono text-sm">
+                      {deposit.transactionCode || 'Chưa có'}
+                    </TableCell>
+                    <TableCell>
+                      {renderStatusBadge(deposit.status)}
+                    </TableCell>
+                    <TableCell className="max-w-xs truncate">
+                      {deposit.note || '-'}
+                    </TableCell>
+                    <TableCell className="text-right space-x-2">
+                      {deposit.status === 'pending' && (
+                        <>
+                          <Button 
+                            variant="outline" 
+                            size="sm" 
+                            className="text-green-600 border-green-200 hover:bg-green-50"
+                            onClick={() => handleStatusUpdate(deposit._id, 'approved')}
+                          >
+                            Duyệt
+                          </Button>
+                          <Button 
+                            variant="outline" 
+                            size="sm" 
+                            className="text-red-600 border-red-200 hover:bg-red-50"
+                            onClick={() => {
+                              const note = prompt('Lý do từ chối (nếu có):');
+                              if (note !== null) {
+                                handleStatusUpdate(deposit._id, 'rejected', note);
+                              }
+                            }}
+                          >
+                            Từ chối
+                          </Button>
+                        </>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Pagination */}
+      {totalPages > 1 && (
+        <div className="flex justify-between items-center">
+          <div className="text-sm text-gray-600">
+            Trang {currentPage} / {totalPages}
+          </div>
+          <div className="flex space-x-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => fetchDeposits(currentPage - 1)}
+              disabled={currentPage <= 1 || loading}
+            >
+              Trước
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => fetchDeposits(currentPage + 1)}
+              disabled={currentPage >= totalPages || loading}
+            >
+              Tiếp
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
-  )
+  );
 }
 
+// Update the DashboardPage component
 const DashboardPage = () => {
-  // State for filters
-  const [customerFilter, setCustomerFilter] = useState('')
-  const [statusFilter, setStatusFilter] = useState('all')
+  // Existing state
+  const [customerFilter, setCustomerFilter] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [startDate, setStartDate] = useState("01/06/2025");
+  const [endDate, setEndDate] = useState("29/06/2025");
+  const [isLoading, setIsLoading] = useState(false);
   
-  // Mock data - replace with actual data fetching
-  const [orderHistoryData, setOrderHistoryData] = useState<Order[]>([])
-  
-  // Stats data
-  const [startDate, setStartDate] = useState("01/06/2025")
-  const [endDate, setEndDate] = useState("29/06/2025")
-  const [isLoading, setIsLoading] = useState(false)
-  const [stats, setStats] = useState({
-    newAccounts: 131,
-    totalDeposits: 10498420000,
-    totalWithdrawals: 6980829240,
-    totalAccounts: 5600000,
-  })
+  // New state for recent data
+  const [recentUsers, setRecentUsers] = useState<RecentUser[]>([]);
+  const [recentSessions, setRecentSessions] = useState<RecentSession[]>([]);
+  const [isLoadingRecentData, setIsLoadingRecentData] = useState(true);
 
-  const [orderData, setOrderData] = useState([
-    {
-      user: "vuthanhtra",
-      session: "29185379",
-      type: "Xuống",
-      amount: "1000000đ",
-      result: "+190,000",
-      time: "28/06/2025 21:59:22",
-    },
-    {
-      user: "vuthanhtra",
-      session: "29185378",
-      type: "Lên",
-      amount: "1000000đ",
-      result: "+190,000",
-      time: "28/06/2025 21:58:20",
-    },
-    {
-      user: "vuthanhtra",
-      session: "29185377",
-      type: "Xuống",
-      amount: "1000000đ",
-      result: "+190,000",
-      time: "28/06/2025 21:57:33",
-    },
-    {
-      user: "vuthanhtra",
-      session: "29185376",
-      type: "Xuống",
-      amount: "1000000đ",
-      result: "+190,000",
-      time: "28/06/2025 21:56:13",
-    },
-    {
-      user: "vuthanhtra",
-      session: "29185375",
-      type: "Lên",
-      amount: "1000000đ",
-      result: "+190,000",
-      time: "28/06/2025 21:55:18",
-    },
-    {
-      user: "vuthanhtra",
-      session: "29185374",
-      type: "Xuống",
-      amount: "1000000đ",
-      result: "+190,000",
-      time: "28/06/2025 21:54:30",
-    },
-    {
-      user: "vuthanhtra",
-      session: "29185374",
-      type: "Xuống",
-      amount: "1000000đ",
-      result: "+190,000",
-      time: "28/06/2025 21:54:18",
-    },
-    {
-      user: "vuthanhtra",
-      session: "29185373",
-      type: "Xuống",
-      amount: "1000000đ",
-      result: "+190,000",
-      time: "28/06/2025 21:53:36",
-    },
-  ])
+  // Fetch recent data
+  useEffect(() => {
+    const fetchRecentData = async () => {
+      try {
+        setIsLoadingRecentData(true);
+        
+        // Fetch recent users
+        const [usersRes, sessionsRes] = await Promise.all([
+          fetch('/api/admin/recent-users'),
+          fetch('/api/admin/recent-sessions')
+        ]);
+        
+        const [usersData, sessionsData] = await Promise.all([
+          usersRes.json(),
+          sessionsRes.json()
+        ]);
+        
+        // Process sessions data to match TradingSession type
+        const processedSessions = (sessionsData.sessions || []).map((session: any) => ({
+          ...session,
+          startTime: new Date(session.startTime),
+          endTime: new Date(session.endTime),
+          status: getSessionStatus(session.startTime, session.endTime),
+          progress: calculateSessionProgress(session.startTime, session.endTime)
+        }));
+        
+        // Sort sessions by start time (newest first)
+        const sortedSessions = processedSessions.sort((a: any, b: any) => 
+          new Date(b.startTime).getTime() - new Date(a.startTime).getTime()
+        );
+        
+        // Get top 10 upcoming or active sessions
+        const upcomingOrActiveSessions = sortedSessions
+          .filter((s: any) => s.status !== 'completed')
+          .slice(0, 10);
+        
+        setRecentUsers(usersData.users || []);
+        setRecentSessions(upcomingOrActiveSessions);
+      } catch (error) {
+        console.error('Error fetching recent data:', error);
+        toast({
+          variant: "destructive",
+          title: "Lỗi",
+          description: "Không thể tải dữ liệu mới nhất. Vui lòng thử lại.",
+        });
+      } finally {
+        setIsLoadingRecentData(false);
+      }
+    };
+
+    // Initial fetch
+    fetchRecentData();
+    
+    // Set up interval to update session status and progress
+    const intervalId = setInterval(() => {
+      setRecentSessions(prevSessions => 
+        prevSessions.map(session => ({
+          ...session,
+          status: getSessionStatus(session.startTime, session.endTime),
+          progress: calculateSessionProgress(session.startTime, session.endTime)
+        }))
+      );
+    }, 1000);
+    
+    return () => clearInterval(intervalId);
+  }, []);
+  
+  // Helper function to get session status
+  const getSessionStatus = (startTime: string | Date, endTime: string | Date) => {
+    const now = new Date();
+    const start = new Date(startTime);
+    const end = new Date(endTime);
+    
+    if (now < start) return 'upcoming';
+    if (now >= start && now <= end) return 'active';
+    return 'completed';
+  };
+  
+  // Helper function to calculate session progress
+  const calculateSessionProgress = (startTime: string | Date, endTime: string | Date) => {
+    const now = new Date();
+    const start = new Date(startTime);
+    const end = new Date(endTime);
+    
+    if (now < start) return 0;
+    if (now > end) return 100;
+    
+    const total = end.getTime() - start.getTime();
+    const elapsed = now.getTime() - start.getTime();
+    return Math.min(100, (elapsed / total) * 100);
+  };
+
+  // Format currency
+  const formatCurrency = (value: number) => {
+    return new Intl.NumberFormat('vi-VN').format(value) + 'đ';
+  };
+
+  // Format date with proper error handling
+  const formatDate = (dateString: string | Date | undefined | null): string => {
+    if (!dateString) return '-';  // Handle undefined, null, or empty string
+    
+    try {
+      const date = typeof dateString === 'string' ? new Date(dateString) : dateString;
+      
+      // Check if the date is valid
+      if (isNaN(date.getTime())) {
+        console.warn('Invalid date string:', dateString);
+        return '-';
+      }
+      
+      return format(date, 'dd/MM/yyyy HH:mm', { locale: vi });
+    } catch (error) {
+      console.error('Error formatting date:', error);
+      return '-';
+    }
+  };
+  
+  // Format time in HH:MM:SS
+  const formatTime = (dateString: string | Date | undefined | null): string => {
+    if (!dateString) return '-';
+    try {
+      const date = typeof dateString === 'string' ? new Date(dateString) : dateString;
+      if (isNaN(date.getTime())) return '-';
+      return format(date, 'HH:mm:ss', { locale: vi });
+    } catch (error) {
+      return '-';
+    }
+  };
 
   const handleApplyFilter = async () => {
     setIsLoading(true)
@@ -625,202 +1559,140 @@ const DashboardPage = () => {
       <div className="flex items-center gap-2 text-sm text-gray-600">
         <Home className="h-4 w-4" />
         <span>/</span>
-        <span>Lịch sử giao dịch</span>
+        <span>Bảng điều khiển</span>
       </div>
 
-      {/* Filters */}
+      {/* Recent Sessions */}
       <Card>
-        <CardContent className="p-6">
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-            <div className="space-y-2">
-              <Label htmlFor="customer">Khách hàng</Label>
-              <Input
-                id="customer"
-                placeholder="Tìm theo tên hoặc mã"
-                value={customerFilter}
-                onChange={(e) => setCustomerFilter(e.target.value)}
-              />
+        <CardHeader>
+          <CardTitle>10 Phiên giao dịch gần nhất</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {isLoadingRecentData ? (
+            <div className="flex justify-center items-center h-40">
+              <Loader2 className="h-8 w-8 animate-spin" />
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="status">Trạng thái</Label>
-              <Select
-                value={statusFilter}
-                onValueChange={(value) => setStatusFilter(value)}
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder="Chọn trạng thái" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">Tất cả</SelectItem>
-                  <SelectItem value="win">Thắng</SelectItem>
-                  <SelectItem value="lose">Thua</SelectItem>
-                  <SelectItem value="pending">Đang chờ</SelectItem>
-                  <SelectItem value="active">Đang diễn ra</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="startDate">Từ ngày</Label>
-              <Input
-                id="startDate"
-                type="date"
-                value={startDate}
-                onChange={(e) => setStartDate(e.target.value)}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="endDate">Đến ngày</Label>
-              <Input
-                id="endDate"
-                type="date"
-                value={endDate}
-                onChange={(e) => setEndDate(e.target.value)}
-              />
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Order History Table */}
-      <Card>
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="w-[120px]">Phiên</TableHead>
-                <TableHead>Người dùng</TableHead>
-                <TableHead className="w-[100px]">Loại</TableHead>
-                <TableHead className="w-[150px]">Số tiền</TableHead>
-                <TableHead className="w-[150px]">Kết quả</TableHead>
-                <TableHead>Thời gian đặt lệnh</TableHead>
-                <TableHead className="w-[150px]">Trạng thái</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {orderHistoryData.map((order: Order) => (
-                <TableRow key={order.id} className={cn({
-                  'bg-green-50': order.isWin,
-                  'hover:bg-green-100': order.isWin,
-                  'bg-red-50': !order.isWin && order.status === 'completed',
-                  'hover:bg-red-100': !order.isWin && order.status === 'completed',
-                  'bg-blue-50': order.status === 'active',
-                  'hover:bg-blue-100': order.status === 'active',
-                })}>
-                  <TableCell className="font-medium">
-                    <div className="flex flex-col">
-                      <span>{order.session}</span>
-                      {order.status === 'active' && (
-                        <div className="text-xs text-blue-600 flex items-center">
-                          <span className="inline-block w-2 h-2 rounded-full bg-blue-500 mr-1"></span>
-                          Đang diễn ra
-                        </div>
-                      )}
-                    </div>
-                  </TableCell>
-                  <TableCell className="text-teal-600 font-medium">{order.user}</TableCell>
-                  <TableCell>
-                    <Badge
-                      variant={order.type === "Lên" ? "default" : "destructive"}
-                      className={cn(
-                        order.type === "Lên" 
-                          ? "bg-green-500 hover:bg-green-600" 
-                          : "bg-red-500 hover:bg-red-600",
-                        "text-white"
-                      )}
-                    >
-                      {order.type}
-                    </Badge>
-                  </TableCell>
-                  <TableCell className="font-medium">{order.amount.toLocaleString('vi-VN', { style: 'currency', currency: 'VND' })}</TableCell>
-                  <TableCell className={cn("font-semibold", {
-                    'text-green-600': order.result > 0,
-                    'text-red-600': order.result < 0,
-                    'text-gray-600': order.result === 0
-                  })}>
-                    {(order.result || 0).toLocaleString('vi-VN', { style: 'currency', currency: 'VND' })}
-                    {order.status === 'active' && (
-                      <div className="text-xs text-blue-600 mt-1">
-                        {order.timeRemaining > 0 ? `${order.timeRemaining}s còn lại` : 'Đang xử lý'}
-                      </div>
-                    )}
-                  </TableCell>
-                  <TableCell className="text-gray-600">
-                    {order.time ? format(new Date(order.time), 'dd/MM/yyyy HH:mm:ss') : 'N/A'}
-                    {order.status === 'active' && (
-                      <div className="w-full bg-gray-200 rounded-full h-1.5 mt-1">
-                        <div 
-                          className="bg-blue-600 h-1.5 rounded-full" 
-                          style={{ width: `${order.sessionProgress}%` }}
-                        ></div>
-                      </div>
-                    )}
-                  </TableCell>
-                  <TableCell>
-                    {order.status === 'completed' ? (
-                      <Badge variant={order.isWin ? 'default' : 'secondary'} className={cn({
-                        'bg-green-100 text-green-800 hover:bg-green-100': order.isWin,
-                        'bg-red-100 text-red-800 hover:bg-red-100': !order.isWin
-                      })}>
-                        {order.isWin ? 'Thắng' : 'Thua'}
-                      </Badge>
-                    ) : order.status === 'active' ? (
-                      <Badge variant="default" className="bg-blue-100 text-blue-800 hover:bg-blue-100">
-                        Đang diễn ra
-                      </Badge>
-                    ) : (
-                      <Badge variant="outline" className="border-blue-200 text-blue-600">
-                        Đang chờ
-                      </Badge>
-                    )}
-                  </TableCell>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>ID Phiên</TableHead>
+                  <TableHead>Thời gian bắt đầu</TableHead>
+                  <TableHead>Thời gian kết thúc</TableHead>
+                  <TableHead>Kết quả</TableHead>
+                  <TableHead>Trạng thái</TableHead>
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+              </TableHeader>
+              <TableBody>
+                {recentSessions.map((session) => (
+                  <TableRow key={session._id}>
+                    <TableCell>{session.sessionId}</TableCell>
+                    <TableCell>{formatDate(session.startTime)}</TableCell>
+                    <TableCell>{formatDate(session.endTime)}</TableCell>
+                    <TableCell className={session.result === 'LÊN' ? 'text-green-500' : 'text-red-500'}>
+                      {session.result || 'Đang chờ...'}
+                    </TableCell>
+                    <TableCell>
+                      <Badge
+                        variant={
+                          session.status === 'completed'
+                            ? 'default'
+                            : session.status === 'active'
+                            ? 'secondary'
+                            : 'outline'
+                        }
+                      >
+                        {session.status === 'completed'
+                          ? 'Đã hoàn thành'
+                          : session.status === 'active'
+                          ? 'Đang diễn ra'
+                          : 'Sắp diễn ra'}
+                      </Badge>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
         </CardContent>
       </Card>
 
-      {/* Pagination */}
-      <div className="flex items-center justify-between mt-4">
-        <div className="text-sm text-gray-600">{orderHistoryData.length} kết quả</div>
-        <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm">
-            <ChevronLeft className="h-4 w-4" />
-          </Button>
-          <Button variant="outline" size="sm" className="bg-blue-600 text-white">
-            1
-          </Button>
-          <Button variant="outline" size="sm">
-            2
-          </Button>
-          <Button variant="outline" size="sm">
-            3
-          </Button>
-          <Button variant="outline" size="sm">
-            4
-          </Button>
-          <Button variant="outline" size="sm">
-            5
-          </Button>
-          <Button variant="outline" size="sm">
-            ...
-          </Button>
-          <Button variant="outline" size="sm">
-            73
-          </Button>
-          <Button variant="outline" size="sm">
-            <ChevronRight className="h-4 w-4" />
-          </Button>
-        </div>
-      </div>
+      {/* Recent Users */}
+      <Card>
+        <CardHeader>
+          <CardTitle>10 Người dùng mới nhất</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {isLoadingRecentData ? (
+            <div className="flex justify-center items-center h-40">
+              <Loader2 className="h-8 w-8 animate-spin" />
+            </div>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Tên đăng nhập</TableHead>
+                  <TableHead>Họ tên</TableHead>
+                  <TableHead>Email</TableHead>
+                  <TableHead>Số dư</TableHead>
+                  <TableHead>Ngày đăng ký</TableHead>
+                  <TableHead>Trạng thái</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {recentUsers.map((user) => (
+                  <TableRow key={user._id}>
+                    <TableCell>{user.username}</TableCell>
+                    <TableCell>{user.fullName || '-'}</TableCell>
+                    <TableCell>{user.email || '-'}</TableCell>
+                    <TableCell>
+                      {user.balance ? formatCurrency(user.balance.available) : '0đ'}
+                    </TableCell>
+                    <TableCell>
+                      {user.createdAt ? format(new Date(user.createdAt), 'dd/MM/yyyy', { locale: vi }) : '-'}
+                    </TableCell>
+                    <TableCell>
+                      <Badge
+                        variant={
+                          user.status?.active
+                            ? 'default'
+                            : 'destructive'
+                        }
+                      >
+                        {user.status?.active ? 'Hoạt động' : 'Đã khóa'}
+                      </Badge>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
     </div>
   )
 }
 
-const TradingSessionsPage = () => {
+  const TradingSessionsPage = () => {
   const [currentPage, setCurrentPage] = useState(1)
   const sessionsPerPage = 10
-  const [allSessions, setAllSessions] = useState<TradingSession[]>(() => generateSessions())
+  const [allSessions, setAllSessions] = useState<TradingSession[]>(() => {
+    // Generate 30 sessions starting from the next minute
+    const startTime = new Date();
+    startTime.setMinutes(startTime.getMinutes() + 1);
+    startTime.setSeconds(1, 0);
+    
+    // Map the Session[] to TradingSession[]
+    return generateSessionsUtil(startTime, 30).map(session => ({
+      id: session.id,
+      startTime: session.startTime,
+      endTime: session.endTime,
+      status: 'upcoming',
+      result: Math.random() > 0.5 ? 'LÊN' : 'XUỐNG',
+      session: session.label,
+      progress: 0
+    }));
+  })
   const [currentTime, setCurrentTime] = useState(new Date())
   const [activeSessionIndex, setActiveSessionIndex] = useState(0)
   const [isLoading, setIsLoading] = useState(true)
@@ -943,8 +1815,8 @@ const TradingSessionsPage = () => {
               <div className="flex justify-between text-sm">
                 <span className="text-muted-foreground">Dự đoán:</span>
                 <span className={cn("font-semibold", {
-                  'text-green-600': currentSession?.result === 'Lên',
-                  'text-red-600': currentSession?.result === 'Xuống'
+                  'text-green-600': currentSession?.result === 'LÊN',
+                  'text-red-600': currentSession?.result === 'XUỐNG'
                 })}>
                   {currentSession?.result}
                 </span>
@@ -996,8 +1868,10 @@ const TradingSessionsPage = () => {
                       </TableCell>
                       <TableCell>
                         <Badge 
-                          variant={session.result === 'Lên' ? 'default' : 'destructive'}
+                          variant={session.result === 'LÊN' ? 'default' : 'destructive'}
                           className={cn({
+                            'bg-green-100 text-green-800 hover:bg-green-100': session.result === 'LÊN',
+                            'bg-red-100 text-red-800 hover:bg-red-100': session.result === 'XUỐNG',
                             'bg-green-500 hover:bg-green-600': session.result === 'Lên',
                             'bg-red-500 hover:bg-red-600': session.result === 'Xuống'
                           })}
@@ -1054,19 +1928,32 @@ const TradingSessionsPage = () => {
                 <TableRow key={index}>
                   <TableCell className="font-medium">{session.session}</TableCell>
                   <TableCell>
-                    <Badge
-                      variant={session.result === "Lên" ? "default" : "destructive"}
-                      className={
-                        session.result === "Lên"
-                          ? "bg-green-500 text-white hover:bg-green-500"
-                          : "bg-red-500 text-white hover:bg-red-500"
-                      }
+                    <Badge 
+                      variant={session.result === 'LÊN' ? 'default' : 'destructive'}
+                      className={cn({
+                        'bg-green-100 text-green-800 hover:bg-green-100': session.result === 'LÊN',
+                        'bg-red-100 text-red-800 hover:bg-red-100': session.result === 'XUỐNG',
+                      })}
                     >
                       {session.result}
                     </Badge>
                   </TableCell>
-                  <TableCell className="text-gray-600">{format(session.startTime, 'dd/MM/yyyy HH:mm:ss')}</TableCell>
-                  <TableCell className="text-gray-600">{format(session.endTime, 'dd/MM/yyyy HH:mm:ss')}</TableCell>
+                  <TableCell>
+                    <div className="text-sm">
+                      <div>{format(session.startTime, 'HH:mm:ss')}</div>
+                      <div className="text-xs text-muted-foreground">
+                        {format(session.startTime, 'dd/MM/yyyy')}
+                      </div>
+                    </div>
+                  </TableCell>
+                  <TableCell>
+                    <div className="text-sm">
+                      <div>{format(session.endTime, 'HH:mm:ss')}</div>
+                      <div className="text-xs text-muted-foreground">
+                        {format(session.endTime, 'dd/MM/yyyy')}
+                      </div>
+                    </div>
+                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>
@@ -1112,250 +1999,277 @@ const TradingSessionsPage = () => {
 }
 
 function WithdrawalRequestsPage() {
-  const [customerFilter, setCustomerFilter] = useState("")
-  const [statusFilter, setStatusFilter] = useState("all")
-  const [startDate, setStartDate] = useState("")
-  const [endDate, setEndDate] = useState("")
 
-  const withdrawalData = [
-    {
-      time: "29/06/2025 14:56:11",
-      customer: "Nguyễn Thu Mai",
-      amount: "600,000đ",
-      receivedAmount: "570,000đ",
-      bank: "LPBANK",
-      accountNumber: "051606050001",
-      accountHolder: "Nguyễn Thu Mai",
-      status: "Chờ duyệt",
-    },
-    {
-      time: "29/06/2025 14:54:26",
-      customer: "Nguyễn Thu Mai",
-      amount: "100,000đ",
-      receivedAmount: "95,000đ",
-      bank: "LPBANK",
-      accountNumber: "051606050001",
-      accountHolder: "Nguyễn Thu Mai",
-      status: "Từ chối",
-    },
-    {
-      time: "29/06/2025 13:15:56",
-      customer: "nguyenthuy1983",
-      amount: "600,000đ",
-      receivedAmount: "570,000đ",
-      bank: "BIDV",
-      accountNumber: "3600688224",
-      accountHolder: "Nguyễn thị Hồng Thúy",
-      status: "Chờ duyệt",
-    },
-    {
-      time: "29/06/2025 12:29:56",
-      customer: "Hangpham1991",
-      amount: "510,000đ",
-      receivedAmount: "484,500đ",
-      bank: "Vietinbank",
-      accountNumber: "102877186224",
-      accountHolder: "Phạm Thị Thanh Hằng",
-      status: "Chờ duyệt",
-    },
-    {
-      time: "28/06/2025 23:00:32",
-      customer: "Đinh Thị Tú Anh 1969",
-      amount: "5,000,000đ",
-      receivedAmount: "4,750,000đ",
-      bank: "Vietinbank",
-      accountNumber: "104876981067",
-      accountHolder: "ĐINH THỊ TÚ ANH",
-      status: "Chờ duyệt",
-    },
-    {
-      time: "28/06/2025 23:00:04",
-      customer: "Đinh Thị Tú Anh 1969",
-      amount: "5,000,000đ",
-      receivedAmount: "4,750,000đ",
-      bank: "Vietinbank",
-      accountNumber: "104876981067",
-      accountHolder: "ĐINH THỊ TÚ ANH",
-      status: "Chờ duyệt",
-    },
-    {
-      time: "28/06/2025 22:59:43",
-      customer: "Đinh Thị Tú Anh 1969",
-      amount: "2,000,000đ",
-      receivedAmount: "1,900,000đ",
-      bank: "Vietinbank",
-      accountNumber: "104876981067",
-      accountHolder: "ĐINH THỊ TÚ ANH",
-      status: "Chờ duyệt",
-    },
-    {
-      time: "28/06/2025 22:22:34",
-      customer: "vuthanhtra",
-      amount: "600,000đ",
-      receivedAmount: "570,000đ",
-      bank: "Ngân hàng quân đội",
-      accountNumber: "0912652386",
-      accountHolder: "Vũ thị thanh trà",
-      status: "Chờ duyệt",
-    },
-    {
-      time: "28/06/2025 20:40:04",
-      customer: "ThuThao85",
-      amount: "600,000đ",
-      receivedAmount: "570,000đ",
-      bank: "MB",
-      accountNumber: "0334191359",
-      accountHolder: "Trần Thị Thu Thảo",
-      status: "Đã duyệt",
-    },
-    {
-      time: "28/06/2025 20:02:05",
-      customer: "Vythao123",
-      amount: "600,000đ",
-      receivedAmount: "570,000đ",
-      bank: "Vietinbank",
-      accountNumber: "107004415214",
-      accountHolder: "Dương Ngọc nương",
-      status: "Đã duyệt",
-    },
-  ]
+  const [withdrawals, setWithdrawals] = useState<WithdrawalRequest[]>([]);
+  const [startDate, setStartDate] = useState<Date>(new Date());
+  const [endDate, setEndDate] = useState<Date>(new Date());
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [statusFilter, setStatusFilter] = useState<RequestStatus | 'all'>('pending');
+  const [customerFilter, setCustomerFilter] = useState('');
+  const [searchTerm, setSearchTerm] = useState('');
+  const itemsPerPage = 10;
+  const { toast } = useToast();
+
+  const fetchWithdrawals = useCallback(async (page: number = 1) => {
+    try {
+      setLoading(true);
+      const queryParams = new URLSearchParams({
+        page: page.toString(),
+        limit: itemsPerPage.toString(),
+        ...(statusFilter !== 'all' && { status: statusFilter }),
+        ...(searchTerm && { search: searchTerm })
+      });
+
+      const response = await fetch(`/api/admin/withdrawals?${queryParams}`);
+      if (!response.ok) {
+        throw new Error('Không thể tải danh sách yêu cầu rút tiền');
+      }
+      
+      const data = await response.json();
+      setWithdrawals(data.withdrawals.map((w: any) => ({
+        ...w,
+        createdAt: new Date(w.createdAt),
+        updatedAt: new Date(w.updatedAt),
+        ...(w.processedAt && { processedAt: new Date(w.processedAt) })
+      })));
+      setTotalPages(data.totalPages);
+      setCurrentPage(data.currentPage);
+    } catch (err) {
+      console.error('Lỗi khi tải yêu cầu rút tiền:', err);
+      setError(err instanceof Error ? err.message : 'Đã xảy ra lỗi');
+      toast({
+        title: 'Lỗi',
+        description: 'Không thể tải danh sách yêu cầu rút tiền',
+        variant: 'destructive',
+      });
+    } finally {
+      setLoading(false);
+    }
+  }, [statusFilter, searchTerm]);
+
+  useEffect(() => {
+    fetchWithdrawals();
+  }, [fetchWithdrawals]);
+
+  const handleStatusUpdate = async (id: string, status: 'approved' | 'rejected', note?: string) => {
+    try {
+      setLoading(true);
+      const response = await fetch(`/api/admin/withdrawals/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status, note })
+      });
+
+      if (!response.ok) {
+        throw new Error('Cập nhật trạng thái thất bại');
+      }
+
+      await fetchWithdrawals(currentPage);
+      
+      toast({
+        title: 'Thành công',
+        description: `Đã ${status === 'approved' ? 'duyệt' : 'từ chối'} yêu cầu rút tiền`,
+        variant: 'default',
+      });
+    } catch (err) {
+      console.error('Lỗi khi cập nhật trạng thái:', err);
+      toast({
+        title: 'Lỗi',
+        description: 'Không thể cập nhật trạng thái yêu cầu',
+        variant: 'destructive',
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const renderStatusBadge = (status: RequestStatus) => {
+    const statusMap = {
+      pending: { label: 'Chờ xử lý', color: 'bg-yellow-100 text-yellow-800' },
+      approved: { label: 'Đã duyệt', color: 'bg-green-100 text-green-800' },
+      rejected: { label: 'Từ chối', color: 'bg-red-100 text-red-800' },
+      cancelled: { label: 'Đã hủy', color: 'bg-gray-100 text-gray-800' }
+    };
+    
+    const statusInfo = statusMap[status] || { label: status, color: 'bg-gray-100 text-gray-800' };
+    
+    return (
+      <span className={`px-2 py-1 rounded-full text-xs font-medium ${statusInfo.color}`}>
+        {statusInfo.label}
+      </span>
+    );
+  };
+
+  const formatBankInfo = (bankAccount: BankAccount | undefined) => {
+    if (!bankAccount) return 'N/A';
+    return `${bankAccount.bankName} - ${bankAccount.accountNumber} (${bankAccount.accountHolder})`;
+  };
 
   return (
-    <div>
-      {/* Breadcrumb */}
-      <div className="flex items-center gap-2 text-sm text-gray-600 mb-6">
-        <Home className="h-4 w-4" />
-        <span>/</span>
-        <span>Yêu cầu rút tiền</span>
-      </div>
-
-      {/* Filters */}
-      <div className="flex items-center gap-4 mb-6">
-        <div className="flex items-center gap-2">
-          <Label>Khách hàng</Label>
-          <Input
-            placeholder="Khách hàng"
-            value={customerFilter}
-            onChange={(e) => setCustomerFilter(e.target.value)}
-            className="w-48"
-          />
-        </div>
-        <div className="flex items-center gap-2">
-          <Label>Trạng thái</Label>
-          <Select value={statusFilter} onValueChange={setStatusFilter}>
+    <div className="p-6 space-y-6">
+      <div className="flex justify-between items-center">
+        <h2 className="text-2xl font-bold">Yêu cầu rút tiền</h2>
+        <div className="flex items-center space-x-4">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-gray-400" />
+            <Input
+              type="text"
+              placeholder="Tìm kiếm theo tên hoặc số tài khoản..."
+              className="pl-10 w-64"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+            />
+          </div>
+          <Select 
+            value={statusFilter} 
+            onValueChange={(value) => setStatusFilter(value as RequestStatus | 'all')}
+          >
             <SelectTrigger className="w-40">
-              <SelectValue placeholder="Trạng thái" />
+              <SelectValue placeholder="Lọc theo trạng thái" />
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">Tất cả</SelectItem>
-              <SelectItem value="pending">Chờ duyệt</SelectItem>
+              <SelectItem value="pending">Chờ xử lý</SelectItem>
               <SelectItem value="approved">Đã duyệt</SelectItem>
+              <SelectItem value="rejected">Từ chối</SelectItem>
+              <SelectItem value="cancelled">Đã hủy</SelectItem>
             </SelectContent>
           </Select>
         </div>
-        <div className="flex items-center gap-2">
-          <Label>Thời gian</Label>
-          <Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="w-40" />
-          <span>-</span>
-          <Input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="w-40" />
-        </div>
-        <Button variant="outline" size="sm">
-          Đặt lại
-        </Button>
-        <Button size="sm" className="bg-green-600 hover:bg-green-700">
-          Áp dụng
-        </Button>
       </div>
 
-      {/* Withdrawal Requests Table */}
       <Card>
         <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Thời gian</TableHead>
-                <TableHead>Khách hàng</TableHead>
-                <TableHead>Số tiền</TableHead>
-                <TableHead>Số tiền nhận</TableHead>
-                <TableHead>Ngân hàng nhận tiền</TableHead>
-                <TableHead>Số tài khoản</TableHead>
-                <TableHead>Chủ tài khoản</TableHead>
-                <TableHead>Trạng thái</TableHead>
-                <TableHead>Action</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {withdrawalData.map((withdrawal, index) => (
-                <TableRow key={index}>
-                  <TableCell>{withdrawal.time}</TableCell>
-                  <TableCell className="text-teal-500">{withdrawal.customer}</TableCell>
-                  <TableCell>{withdrawal.amount}</TableCell>
-                  <TableCell>{withdrawal.receivedAmount}</TableCell>
-                  <TableCell>{withdrawal.bank}</TableCell>
-                  <TableCell>{withdrawal.accountNumber}</TableCell>
-                  <TableCell>{withdrawal.accountHolder}</TableCell>
-                  <TableCell>
-                    <Badge
-                      variant={
-                        withdrawal.status === "Đã duyệt"
-                          ? "default"
-                          : withdrawal.status === "Từ chối"
-                            ? "destructive"
-                            : "secondary"
-                      }
-                      className={
-                        withdrawal.status === "Đã duyệt"
-                          ? "bg-green-500 text-white hover:bg-green-500"
-                          : withdrawal.status === "Từ chối"
-                            ? "bg-red-500 text-white hover:bg-red-500"
-                            : "bg-blue-500 text-white hover:bg-blue-500"
-                      }
-                    >
-                      {withdrawal.status}
-                    </Badge>
-                  </TableCell>
-                  <TableCell>
-                    <div className="flex gap-2">
-                      {withdrawal.status === "Chờ duyệt" ? (
-                        <>
-                          <Button size="sm" className="bg-green-500 hover:bg-green-600 text-white">
-                            Phê duyệt
-                          </Button>
-                          <Button size="sm" variant="outline" className="text-gray-600 bg-transparent">
-                            Từ chối
-                          </Button>
-                        </>
-                      ) : (
-                        <>
-                          <Button size="sm" variant="outline" className="text-gray-400 bg-transparent" disabled>
-                            Phê duyệt
-                          </Button>
-                          <Button size="sm" variant="outline" className="text-gray-400 bg-transparent" disabled>
-                            Từ chối
-                          </Button>
-                        </>
-                      )}
-                    </div>
-                  </TableCell>
+          {loading ? (
+            <div className="flex justify-center items-center p-8">
+              <Loader2 className="h-6 w-6 animate-spin text-gray-500" />
+              <span className="ml-2">Đang tải...</span>
+            </div>
+          ) : error ? (
+            <div className="p-6 text-center text-red-500">{error}</div>
+          ) : withdrawals.length === 0 ? (
+            <div className="p-6 text-center text-gray-500">
+              Không tìm thấy yêu cầu rút tiền nào
+            </div>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Thời gian</TableHead>
+                  <TableHead>Khách hàng</TableHead>
+                  <TableHead>Số tiền</TableHead>
+                  <TableHead>Nhận về</TableHead>
+                  <TableHead>Ngân hàng</TableHead>
+                  <TableHead>Trạng thái</TableHead>
+                  <TableHead className="text-right">Thao tác</TableHead>
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+              </TableHeader>
+              <TableBody>
+                {withdrawals.map((withdrawal) => (
+                  <TableRow key={withdrawal._id}>
+                    <TableCell className="whitespace-nowrap">
+                      {format(withdrawal.createdAt, 'dd/MM/yyyy HH:mm')}
+                    </TableCell>
+                    <TableCell className="font-medium">
+                      <div>{withdrawal.username}</div>
+                      <div className="text-xs text-gray-500">ID: {withdrawal.userId}</div>
+                    </TableCell>
+                    <TableCell className="font-medium">
+                      {new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(withdrawal.amount)}
+                    </TableCell>
+                    <TableCell className="font-medium text-green-600">
+                      {new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(withdrawal.receivedAmount)}
+                    </TableCell>
+                    <TableCell className="text-sm">
+                      <div>{withdrawal.bankAccount.bankName}</div>
+                      <div className="text-xs text-gray-500">{withdrawal.bankAccount.accountNumber}</div>
+                      <div className="text-xs text-gray-500">{withdrawal.bankAccount.accountHolder}</div>
+                    </TableCell>
+                    <TableCell>
+                      {renderStatusBadge(withdrawal.status)}
+                      {withdrawal.processedAt && (
+                        <div className="text-xs text-gray-500 mt-1">
+                          {format(withdrawal.processedAt, 'dd/MM/yyyy HH:mm')}
+                        </div>
+                      )}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      {withdrawal.status === 'pending' && (
+                        <div className="flex justify-end">
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button variant="ghost" className="h-8 w-8 p-0">
+                                <span className="sr-only">Mở menu</span>
+                                <MoreHorizontal className="h-4 w-4" />
+                              </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end">
+                              <DropdownMenuItem 
+                                onClick={() => handleStatusUpdate(withdrawal._id, 'approved')}
+                                className="text-green-600"
+                              >
+                                <Check className="mr-2 h-4 w-4" /> Duyệt
+                              </DropdownMenuItem>
+                              <DropdownMenuItem 
+                                onClick={() => handleStatusUpdate(withdrawal._id, 'rejected')}
+                                className="text-red-600"
+                              >
+                                <X className="mr-2 h-4 w-4" /> Từ chối
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        </div>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
         </CardContent>
       </Card>
+
+      {/* Pagination */}
+      {totalPages > 1 && (
+        <div className="flex justify-between items-center">
+          <div className="text-sm text-gray-600">
+            Trang {currentPage} / {totalPages}
+          </div>
+          <div className="flex space-x-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => fetchWithdrawals(currentPage - 1)}
+              disabled={currentPage <= 1 || loading}
+            >
+              Trước
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => fetchWithdrawals(currentPage + 1)}
+              disabled={currentPage >= totalPages || loading}
+            >
+              Tiếp
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
-
 // Settings Page Component
 function SettingsPage() {
-  const [bankName, setBankName] = useState("ABBANK")
-  const [accountNumber, setAccountNumber] = useState("0387473721")
-  const [accountHolder, setAccountHolder] = useState("VU VAN MIEN")
-  const [minDeposit, setMinDeposit] = useState("100,000")
-  const [minWithdrawal, setMinWithdrawal] = useState("100,000")
-  const [maxWithdrawal, setMaxWithdrawal] = useState("100,000")
-  const [cskh, setCskh] = useState("https://t.me/DICHVUCSKHLS")
+  const [bankName, setBankName] = useState<string>("ABBANK")
+  const [accountNumber, setAccountNumber] = useState<string>("0387473721")
+  const [accountHolder, setAccountHolder] = useState<string>("VU VAN MIEN")
+  const [minDeposit, setMinDeposit] = useState<string>("100,000")
+  const [minWithdrawal, setMinWithdrawal] = useState<string>("100,000")
+  const [maxWithdrawal, setMaxWithdrawal] = useState<string>("100,000")
+  const [cskh, setCskh] = useState<string>("https://t.me/DICHVUCSKHLS")
 
   return (
     <div>
@@ -1597,55 +2511,4 @@ function parseTimestamp(timestamp: string): Date {
   return new Date(year, month, day, hours, minutes);
 }
 
-function generateSessions(baseTimestamp: string = ''): TradingSession[] {
-  const sessions: TradingSession[] = [];
-  let startTime: Date;
-  
-  if (baseTimestamp && baseTimestamp.length === 12) {
-    // Use the provided timestamp as the base time
-    startTime = parseTimestamp(baseTimestamp);
-  } else {
-    // Default to current time if no valid timestamp is provided
-    startTime = new Date();
-  }
-  
-  // Generate 5 sessions per day (every 2 hours from 9:00 to 17:00)
-  for (let i = 0; i < 7; i++) {
-    const date = new Date(startTime);
-    date.setDate(startTime.getDate() + i);
-    
-    for (let j = 0; j < 5; j++) {
-      startTime.setHours(9 + (j * 2), 0, 0, 0);
-      
-      const endTime = new Date(startTime);
-      endTime.setHours(startTime.getHours() + 2);
-      
-      // Determine session status based on current time
-      let status: 'upcoming' | 'active' | 'completed';
-      const currentTime = new Date();
-      
-      if (currentTime > endTime) {
-        status = 'completed';
-      } else if (currentTime >= startTime && currentTime <= endTime) {
-        status = 'active';
-      } else {
-        status = 'upcoming';
-      }
-      
-      // Format session ID as YYYYMMDDHHmm-HHmm
-      const sessionId = `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}${String(date.getDate()).padStart(2, '0')}${String(9 + j * 2).padStart(2, '0')}00`;
-      
-      sessions.push({
-        id: sessionId,
-        startTime,
-        endTime,
-        status,
-        result: Math.random() > 0.5 ? 'Tăng' : 'Giảm',
-        session: `Phiên ${j + 1} (${9 + j * 2}:00 - ${11 + j * 2}:00)`,
-        progress: status === 'completed' ? 100 : status === 'active' ? Math.floor(Math.random() * 100) : 0
-      });
-    }
-  }
-  
-  return sessions;
-}
+

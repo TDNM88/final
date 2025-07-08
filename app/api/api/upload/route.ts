@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { verifyToken } from '@/lib/auth';
 import { uploadFile } from '@/lib/fileUpload';
-import { getMongoDb } from '@/lib/db';
+import { getMongoDb } ;
 import { ObjectId } from 'mongodb';
 
 // Cấu hình cho API route này để cho phép file lớn

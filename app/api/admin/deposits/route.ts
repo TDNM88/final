@@ -1,29 +1,31 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getMongoDb } from '@/lib/db';
+import { getMongoDb } from '@/lib/mongodb';
 import { ObjectId } from 'mongodb';
-import { verifyToken } from '@/lib/auth';
+import { isAuthenticated } from '@/lib/auth';
 
 // API để lấy danh sách yêu cầu nạp tiền (dành cho Admin)
 export async function GET(req: NextRequest) {
   try {
     // Xác thực admin
-    const token = req.headers.get('authorization')?.split(' ')[1];
-    if (!token) {
+    const cookieHeader = req.headers.get('cookie');
+    if (!cookieHeader) {
       return NextResponse.json({ message: 'Bạn cần đăng nhập' }, { status: 401 });
     }
 
-    const user = await verifyToken(token);
-    if (!user || !user.id) {
-      return NextResponse.json({ message: 'Token không hợp lệ' }, { status: 401 });
+    // Create a cookie store from the request headers
+    const cookies = cookieHeader.split(';').reduce((cookies, cookie) => {
+      const [name, value] = cookie.split('=').map(c => c.trim());
+      cookies[name] = value;
+      return cookies;
+    }, {} as Record<string, string>);
+
+    // Check if admin is authenticated
+    if (cookies['admin-session'] !== 'authenticated') {
+      return NextResponse.json({ message: 'Bạn cần đăng nhập' }, { status: 401 });
     }
 
     // Kết nối DB
     const db = await getMongoDb();
-
-    // Kiểm tra quyền admin
-    if (user.role !== 'admin') {
-      return NextResponse.json({ message: 'Bạn không có quyền truy cập' }, { status: 403 });
-    }
 
     // Parse query params
     const url = new URL(req.url);
@@ -93,15 +95,25 @@ export async function GET(req: NextRequest) {
 export async function PUT(req: NextRequest) {
   try {
     // Xác thực admin
-    const token = req.headers.get('authorization')?.split(' ')[1];
-    if (!token) {
+    const cookieHeader = req.headers.get('cookie');
+    if (!cookieHeader) {
       return NextResponse.json({ message: 'Bạn cần đăng nhập' }, { status: 401 });
     }
 
-    const user = await verifyToken(token);
-    if (!user || !user.id) {
-      return NextResponse.json({ message: 'Token không hợp lệ' }, { status: 401 });
+    // Create a cookie store from the request headers
+    const cookies = cookieHeader.split(';').reduce((cookies, cookie) => {
+      const [name, value] = cookie.split('=').map(c => c.trim());
+      cookies[name] = value;
+      return cookies;
+    }, {} as Record<string, string>);
+
+    // Check if admin is authenticated
+    if (cookies['admin-session'] !== 'authenticated') {
+      return NextResponse.json({ message: 'Bạn cần đăng nhập' }, { status: 401 });
     }
+
+    // Kết nối DB
+    const db = await getMongoDb();
 
     // Parse request body
     const { depositId, status, notes } = await req.json();
@@ -114,18 +126,16 @@ export async function PUT(req: NextRequest) {
       return NextResponse.json({ message: 'Trạng thái không hợp lệ' }, { status: 400 });
     }
 
-    // Kết nối DB
-    const db = await getMongoDb();
-
-    // Kiểm tra quyền admin
-    if (user.role !== 'admin') {
-      return NextResponse.json({ message: 'Bạn không có quyền truy cập' }, { status: 403 });
-    }
-
     // Lấy thông tin yêu cầu nạp tiền
-    const deposit = await db.collection('deposits').findOne({ _id: new ObjectId(depositId) });
-    if (!deposit) {
-      return NextResponse.json({ message: 'Không tìm thấy yêu cầu nạp tiền' }, { status: 404 });
+    let deposit;
+    try {
+      deposit = await db.collection('deposits').findOne({ _id: new ObjectId(depositId) });
+      if (!deposit) {
+        return NextResponse.json({ message: 'Không tìm thấy yêu cầu nạp tiền' }, { status: 404 });
+      }
+    } catch (error) {
+      console.error('Error finding deposit:', error);
+      return NextResponse.json({ message: 'Lỗi khi tìm kiếm yêu cầu nạp tiền' }, { status: 500 });
     }
 
     // Nếu yêu cầu đã được xử lý
@@ -134,29 +144,36 @@ export async function PUT(req: NextRequest) {
     }
 
     // Cập nhật trạng thái yêu cầu
+    const updateData: any = {
+      status,
+      updatedAt: new Date()
+    };
+
+    if (status === 'approved') {
+      // Nếu phê duyệt, cập nhật số dư người dùng
+      await db.collection('users').updateOne(
+        { _id: deposit.user },
+        { $inc: { 'balance.available': deposit.amount } }
+      );
+    }
+
+    // Cập nhật trạng thái yêu cầu
     await db.collection('deposits').updateOne(
       { _id: new ObjectId(depositId) },
       {
         $set: {
-          status,
-          notes: notes || '',
-          approvedBy: new ObjectId(user.id),
-          approvedAt: new Date(),
-          updatedAt: new Date()
+          ...updateData,
+          notes: notes || ''
         }
       }
     );
 
-    // Nếu phê duyệt, cộng tiền vào tài khoản người dùng
-    if (status === 'approved') {
-      await db.collection('users').updateOne(
-        { _id: deposit.user },
-        { $inc: { balance: deposit.amount } }
-      );
-    }
+    // Lấy thông tin cập nhật để trả về
+    const updatedDeposit = await db.collection('deposits').findOne({ _id: new ObjectId(depositId) });
 
     return NextResponse.json({
-      message: `Đã ${status === 'approved' ? 'phê duyệt' : 'từ chối'} yêu cầu nạp tiền`
+      message: `Đã ${status === 'approved' ? 'phê duyệt' : 'từ chối'} yêu cầu nạp tiền`,
+      deposit: updatedDeposit
     });
 
   } catch (error) {

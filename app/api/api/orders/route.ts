@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getMongoDb } from '@/lib/db';
+import { getMongoDb } ;
 import { verifyToken } from '@/lib/auth';
 import { MongoClient, ObjectId } from 'mongodb';
 

@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getMongoDb } from '@/lib/db';
+import { getMongoDb } ;
 import { hashPassword } from '@/lib/auth';
 
 // API endpoint tạm thời để tạo tài khoản admin
