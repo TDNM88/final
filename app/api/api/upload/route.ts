@@ -5,12 +5,8 @@ import { getMongoDb } from '@/lib/db';
 import { ObjectId } from 'mongodb';
 
 // Cấu hình cho API route này để cho phép file lớn
-export const config = {
-  api: {
-    bodyParser: false, // Disable body parser để xử lý upload file lớn
-  },
-  maxDuration: 60, // Tăng thời gian tối đa của serverless function (cho Vercel)
-};
+export const maxDuration = 60; // Tăng thời gian tối đa của serverless function (cho Vercel)
+export const dynamic = 'force-dynamic';
 
 // API xử lý upload file
 export async function POST(req: NextRequest) {
